@@ -1,0 +1,1 @@
+{"task":"quality","classes":["clear","blurry","unusable"],"manifest":"workbench/datasets/quality.json","output":"workbench/data/runs","epochs":30,"batch":16,"learning_rate":0.001,"seed":42}

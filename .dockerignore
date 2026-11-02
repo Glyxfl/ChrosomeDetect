@@ -1,0 +1,11 @@
+**
+!workbench
+!workbench/**
+!README.md
+!DEPLOYMENT.md
+workbench/data
+workbench/**/__pycache__
+workbench/datasets/*.json
+!workbench/datasets/example.json
+**/*.pt
+**/*.sqlite3*

@@ -1,0 +1,1 @@
+{"task":"phase","classes":["mi","non_mi","unreadable"],"manifest":"workbench/datasets/phase.json","output":"workbench/data/runs","epochs":30,"batch":16,"learning_rate":0.001,"seed":42}

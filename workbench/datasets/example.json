@@ -1,0 +1,5 @@
+[
+  {"image":"images/train-example.png","label":"mi","split":"train","group":"slide-001","reviewed":true},
+  {"image":"images/validation-example.png","label":"mi","split":"validation","group":"slide-002","reviewed":true},
+  {"image":"images/test-example.png","label":"mi","split":"test","group":"slide-003","reviewed":true}
+]

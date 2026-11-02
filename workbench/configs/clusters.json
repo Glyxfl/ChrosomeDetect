@@ -1,0 +1,1 @@
+{"task":"clusters","classes":["cluster"],"manifest":"workbench/datasets/clusters.json","output":"workbench/data/runs","initial_weights":"chromosome_detector/weights/yolov8n.pt","epochs":80,"batch":4,"imgsz":768,"seed":42}

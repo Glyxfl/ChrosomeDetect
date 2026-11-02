@@ -1,0 +1,1 @@
+{"task":"outliers","classes":["normal","outlier"],"manifest":"workbench/datasets/outliers.json","output":"workbench/data/runs","seed":42}

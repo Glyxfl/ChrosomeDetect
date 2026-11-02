@@ -1,0 +1,19 @@
+services:
+  workbench:
+    build: .
+    ports:
+      - "127.0.0.1:8766:8766"
+    volumes:
+      - ./runtime:/app/workbench/data
+      - ./models:/models:ro
+    environment:
+      CLUSTER_WEIGHTS: /models/chromosome_cluster.pt
+      PHASE_WEIGHTS: /models/mi_classifier.pt
+      MI_BACKBONE_WEIGHTS: /models/yolov8n.pt
+      QUALITY_WEIGHTS: /app/workbench/data/models/quality.pt
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/api/health',timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      retries: 3

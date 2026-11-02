@@ -1,0 +1,25 @@
+# Source-only allowlist. Never stage microscopy data, annotations or weights.
+/*
+!/.gitignore
+!/.dockerignore
+!/README.md
+!/DEPLOYMENT.md
+!/Dockerfile
+!/compose.yaml
+!/.github/
+!/workbench/
+!/scripts/
+!/启动统一分析工作台.cmd
+**/__pycache__/
+*.pyc
+*.pt
+*.pth
+*.onnx
+*.npz
+*.sqlite3*
+.env
+.env.*
+!.env.example
+workbench/data/
+workbench/datasets/*.json
+!workbench/datasets/example.json
