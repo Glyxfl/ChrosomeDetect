@@ -22,6 +22,15 @@ function renderUploadQueue(){
 const slideStates={uploading:'上传中',imported:'已导入',queued:'等待识别',running:'自动识别中',preparing_review:'准备簇图复核',completed:'全片提取完成',completed_partial:'局部提取完成',completed_with_issues:'完成，有失败簇',failed:'识别失败',interrupted:'已中断，可继续'};
 function slideMessage(text,success=false){$('slideMessage').hidden=!text;$('slideMessage').textContent=text;$('slideMessage').className='message'+(success?' success':'');}
 function leaveSlides(){slideVisible=false;clearTimeout(slideTimer);clearTimeout(regionTimer);}
+function slideTiming(s){
+  if(['completed','completed_partial','completed_with_issues','failed','interrupted'].includes(s.status)&&s.machine_seconds!==undefined)return `${s.machine_seconds.toFixed(1)} s（累计处理）`;
+  if(s.status==='queued')return '排队中';
+  const p=s.scan_progress;
+  if(!p)return '处理中 / 待测量';
+  if(p.stage!=='scan')return `扫描完成，合并 / 裁图 / 准备复核中`;
+  const eta=p.estimated_remaining_seconds;
+  return `本轮扫描 ${p.session_seconds.toFixed(0)} s · ${p.tiles_per_second.toFixed(2)} 图块/s<small>${eta==null?'正在估算':`扫描预计剩余 ${Math.ceil(eta/60)} 分钟`}（另需合并、裁图、准备复核）</small>`;
+}
 async function showSlides(id=null,projectId=null){
   slideVisible=true;batchVisible=false;clearTimeout(batchTimer);$('slidesPage').hidden=false;$('analysisPage').hidden=true;$('batchPage').hidden=true;$('trainingPage').hidden=true;
   ['analysisNav','batchNav','trainingNav'].forEach(id=>$(id).classList.remove('active'));$('slidesNav').classList.add('active');$('pageTitle').textContent='从 SDPC 切片自动提取染色体簇';
@@ -32,7 +41,7 @@ async function showSlides(id=null,projectId=null){
 async function refreshSlides(){
   clearTimeout(slideTimer);
   const slides=await api('/api/slides');
-  $('slideRows').innerHTML=slides.map(s=>`<tr><td><button data-slide="${s.id}">${escapeHTML(s.name)}</button><small>${(s.size/1024**3).toFixed(2)} GiB · ${s.id.slice(0,10)}</small></td><td>${slideStates[s.status]||escapeHTML(s.status)}${s.partial?' / 局部':''}<small>${escapeHTML(s.error||s.progress||'')}</small></td><td>${s.cluster_count||0}</td><td>${s.machine_seconds===undefined?'处理中 / 待完成':s.machine_seconds.toFixed(1)+' s'}</td><td>${['failed','interrupted'].includes(s.status)?`<button data-resume="${s.id}">继续扫描</button>`:''}<a class="crop-download" href="/api/slides/${s.id}/log" target="_blank" rel="noopener">扫描日志</a></td></tr>`).join('')||'<tr><td colspan="5">请导入 .sdpc 原始切片，导入后会自动开始识别。</td></tr>';
+  $('slideRows').innerHTML=slides.map(s=>`<tr><td><button data-slide="${s.id}">${escapeHTML(s.name)}</button><small>${(s.size/1024**3).toFixed(2)} GiB · ${s.id.slice(0,10)}</small></td><td>${slideStates[s.status]||escapeHTML(s.status)}${s.partial?' / 局部':''}<small>${escapeHTML(s.error||s.progress||'')}</small></td><td>${s.cluster_count||0}</td><td>${slideTiming(s)}</td><td>${['failed','interrupted'].includes(s.status)?`<button data-resume="${s.id}">继续扫描</button>`:''}<a class="crop-download" href="/api/slides/${s.id}/log" target="_blank" rel="noopener">扫描日志</a></td></tr>`).join('')||'<tr><td colspan="5">请导入 .sdpc 原始切片，导入后会自动开始识别。</td></tr>';
   const byId=new Map(slides.map(s=>[s.id,s]));
   for(const button of $('slideRows').querySelectorAll('[data-slide]')){
     const source=byId.get(button.dataset.slide);if(source?.relative_path)button.textContent=source.relative_path;

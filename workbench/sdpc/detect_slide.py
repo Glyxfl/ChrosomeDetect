@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import numpy as np
 from PIL import ImageEnhance
 from .slide_io import Slide
 from .native_decode import decode_tiles
+from .progress import scan_progress
 
 def positions(length, tile, overlap):
     if length <= tile:return [0]
@@ -106,7 +108,7 @@ def main():
     p.add_argument('--imgsz',type=int,default=1024)
     p.add_argument('--conf',type=float,default=.35)
     p.add_argument('--batch',type=int,default=2)
-    p.add_argument('--decode-workers',type=int,default=0,help='Independent native SDK decoder processes; 0 means sequential')
+    p.add_argument('--decode-workers',type=int,default=min(2,max(0,(os.cpu_count() or 1)-1)),help='Independent native SDK decoder processes; default up to 2, 0 means sequential')
     p.add_argument('--model-label',default='prototype chromosome-cluster detector')
     p.add_argument('--device',default='0')
     p.add_argument('--padding',type=int,default=64,help='L0 pixels surrounding the merged cluster')
@@ -146,7 +148,9 @@ def main():
             # interruption occurred between the JSON record and its newline.
             checkpoint.write_text(''.join(s+'\n' for s in valid_lines),encoding='utf-8')
     else:configfile.write_text(json.dumps(signature,indent=2),encoding='utf-8')
-    started=time.time();last=0;skipped_blank=0
+    started=time.perf_counter();last=0;skipped_blank=0;initial_completed=len(done)
+    acceleration=dict(device=args.device,decode_workers=args.decode_workers,batch_size=args.batch)
+    print('ACCELERATION '+json.dumps(acceleration),flush=True)
     with Slide(args.slide) as slide:
         w0,h0=slide.dimensions[0]
         roi=args.roi or [0,0,w0,h0]
@@ -183,9 +187,14 @@ def main():
                 else:batch.append((tile,im))
                 if len(batch)>=args.batch:
                     record(detect_batch(model,batch,slide,args),fp);batch=[]
-                if time.time()-last>20:
-                    print(f'SCAN {len(done)}/{total} tiles; {len(detections)} raw predictions; elapsed {time.time()-started:.0f}s',flush=True);last=time.time()
+                if time.perf_counter()-last>20:
+                    stats=scan_progress(len(done),total,initial_completed,time.perf_counter()-started)
+                    print(f'SCAN {len(done)}/{total} tiles; {len(detections)} raw predictions; elapsed {stats["session_seconds"]:.0f}s',flush=True)
+                    print('PROGRESS '+json.dumps(stats),flush=True);last=time.perf_counter()
             if batch:record(detect_batch(model,batch,slide,args),fp)
+        stats=scan_progress(len(done),total,initial_completed,time.perf_counter()-started)
+        print('PROGRESS '+json.dumps(dict(stats,stage='merge',estimated_remaining_seconds=None)),flush=True)
+        scan_seconds=time.perf_counter()-started
         print(f'MERGE {len(detections)} raw predictions',flush=True)
         clusters=recover_boundaries(model,merge_detections(detections),slide,args)
         rawdir=out/'L0_original';rawdir.mkdir(exist_ok=True)
@@ -203,8 +212,11 @@ def main():
             if args.processed:ImageEnhance.Contrast(image).enhance(1.12).save(out/'L0_processed'/name,compress_level=3)
             recordrow=dict(id=i,file=f'L0_original/{name}',width=image.width,height=image.height,crop_box_l0=bounds,**c)
             manifest.append(recordrow)
-        summary=dict(slide=str(args.slide),slide_dimensions_l0=[w0,h0],pyramid_dimensions=slide.dimensions,downsamples=slide.downsamples,scan_roi_l0=roi,levels=args.levels,tiles_completed=len(done),tiles_planned=total,tiles_full_roi=total_full,raw_predictions=len(detections),exported_clusters=len(manifest),partial_run=total<total_full,full_slide_run=total==total_full and roi==[0,0,w0,h0],saved_level=0,resized=False,lossless_png=True,elapsed_seconds=round(time.time()-started,1),model_status=args.model_label+'; detections require quality review; scores are not calibrated probabilities',blank_tiles_skipped_this_session=skipped_blank)
-        summary['skipped_exports']=skipped_exports
+        summary=dict(slide=str(args.slide),slide_dimensions_l0=[w0,h0],pyramid_dimensions=slide.dimensions,downsamples=slide.downsamples,scan_roi_l0=roi,levels=args.levels,tiles_completed=len(done),tiles_planned=total,tiles_full_roi=total_full,raw_predictions=len(detections),exported_clusters=len(manifest),partial_run=total<total_full,full_slide_run=total==total_full and roi==[0,0,w0,h0],saved_level=0,resized=False,lossless_png=True,elapsed_seconds=round(time.perf_counter()-started,1),model_status=args.model_label+'; detections require quality review; scores are not calibrated probabilities',blank_tiles_skipped_this_session=skipped_blank)
+        summary.update(skipped_exports=skipped_exports,acceleration=acceleration,
+                       scan_seconds_this_session=round(scan_seconds,2),
+                       session_tiles=len(done)-initial_completed,resumed_tiles=initial_completed,
+                       scan_tiles_per_second=stats['tiles_per_second'])
         (out/'detections.json').write_text(json.dumps(dict(summary=summary,clusters=manifest),ensure_ascii=False,indent=2),encoding='utf-8')
         with (out/'coordinates.csv').open('w',encoding='utf-8-sig',newline='') as fp:
             wr=csv.writer(fp);wr.writerow(['id','file','score','box_x0_L0','box_y0_L0','box_x1_L0','box_y1_L0','crop_x0_L0','crop_y0_L0','crop_x1_L0','crop_y1_L0','input_levels','observations','boundary_recovery'])

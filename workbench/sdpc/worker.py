@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from PIL import Image
@@ -46,7 +47,12 @@ def main():
     else:
         import torch
         from .detect_slide import main as detect
-        sys.argv=['sdpc-detect',str(a.source),'--output',str(a.output),'--weights',str(a.weights),'--device','0' if torch.cuda.is_available() else 'cpu']
+        # Separate SDK handles in bounded worker processes overlap decode and GPU
+        # inference. Keep batch 2 on 4 GiB cards; do not reduce scan coverage.
+        workers=int(os.environ.get('SDPC_DECODE_WORKERS',min(2,max(0,(os.cpu_count() or 1)-1))))
+        batch=int(os.environ.get('SDPC_BATCH_SIZE','2'))
+        sys.argv=['sdpc-detect',str(a.source),'--output',str(a.output),'--weights',str(a.weights),'--device','0' if torch.cuda.is_available() else 'cpu',
+                  '--decode-workers',str(workers),'--batch',str(batch)]
         if a.roi:sys.argv.extend(['--roi',*map(str,a.roi)])
         if a.limit:sys.argv.extend(['--limit',str(a.limit)])
         if a.resume:sys.argv.append('--resume')

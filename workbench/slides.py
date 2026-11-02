@@ -150,7 +150,14 @@ class Slides:
                     f.write(line);f.flush()
                     job['progress']=line.strip()[:1000]
                     self.store.record('jobs',job)
-                    current=self.get(slide['id']);current['progress']=job['progress'];self.store.record('slides',current)
+                    current=self.get(slide['id']);current['progress']=job['progress']
+                    if line.startswith('PROGRESS '):
+                        try:current['scan_progress']=json.loads(line[len('PROGRESS '):])
+                        except (ValueError,TypeError):pass
+                    if line.startswith('ACCELERATION '):
+                        try:current['acceleration']=json.loads(line[len('ACCELERATION '):])
+                        except (ValueError,TypeError):pass
+                    self.store.record('slides',current)
                 code=process.wait()
                 if code:raise RuntimeError(f'SDPC {command} 失败（退出码 {code}），详见切片扫描日志')
             finally:
@@ -166,7 +173,8 @@ class Slides:
             if not Path(slide['source_path']).is_file():raise ValueError('原始 SDPC 已移动或删除')
             job=dict(id=uuid.uuid4().hex,project_id='slide:'+identifier,slide_id=identifier,stage='sdpc_detection',status='queued',created_at=now())
             self.service.jobs[job['id']]=job;self.store.record('jobs',job)
-            slide.update(status='queued',job_id=job['id'],error=None);self.store.record('slides',slide)
+            previous_seconds=slide.get('machine_seconds',0)
+            slide.update(status='queued',job_id=job['id'],error=None,scan_progress=None);self.store.record('slides',slide)
         queued=time.perf_counter()
         def work():
             start=time.perf_counter();job.update(status='running',started_at=now(),queue_seconds=start-queued);self.store.record('jobs',job)
@@ -197,10 +205,10 @@ class Slides:
                     slide['progress']=f'准备复核 {index}/{len(report["clusters"])} 簇'
                     if index==1 or index%25==0:self.store.record('slides',slide)
                 slide.update(status='completed_with_issues' if failures else 'completed_partial' if not report['summary']['full_slide_run'] else 'completed',
-                             partial=not report['summary']['full_slide_run'],failures=failures,machine_seconds=time.perf_counter()-start,finished_at=now())
+                             partial=not report['summary']['full_slide_run'],failures=failures,machine_seconds=previous_seconds+time.perf_counter()-start,finished_at=now())
                 self.store.record('slides',slide);job['status']='completed'
             except Exception as exc:
-                job.update(status='failed',error=str(exc));slide=self.get(identifier);slide.update(status='failed',error=str(exc));self.store.record('slides',slide)
+                job.update(status='failed',error=str(exc));slide=self.get(identifier);slide.update(status='failed',error=str(exc),machine_seconds=previous_seconds+time.perf_counter()-start);self.store.record('slides',slide)
             finally:
                 job.update(compute_seconds=time.perf_counter()-start,finished_at=now());self.store.record('jobs',job)
         self.service.pool.submit(work)
