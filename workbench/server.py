@@ -60,6 +60,7 @@ def handler(service):
                 path = urlparse(self.path).path
                 parts = path.strip('/').split('/')
                 if path=='/api/slides':return self.reply(200,service.slides.summaries())
+                if len(parts)==4 and parts[:3]==['api','slides','import-batches']:return self.reply(200,service.slides.import_batch(parts[3]))
                 if len(parts)==4 and parts[:3]==['api','slides','uploads']:return self.reply(200,service.slides.upload_status(parts[3]))
                 if len(parts)>=3 and parts[:2]==['api','slides']:
                     slide=service.slides.get(parts[2]);folder=service.slides.folder(parts[2])
@@ -117,7 +118,7 @@ def handler(service):
                         b = io.BytesIO()
                         im.save(b, format='PNG')
                         return self.reply(200, b.getvalue(), 'image/png')
-                files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/slides.js':('slides.js','text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+                files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/slides.js':('slides.js','text/javascript; charset=utf-8'), '/sdpc-upload.js':('sdpc-upload.js','text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
                 if path in files:
                     name, mime = files[path]
                     return self.reply(200, (STATIC / name).read_bytes(), mime)
@@ -148,6 +149,7 @@ def handler(service):
                 data = self.rfile.read(length)
                 if path=='/api/slides/uploads':return self.reply(201,service.slides.begin(json.loads(data)))
                 if path=='/api/slides/local':return self.reply(202,service.slides.local(json.loads(data)))
+                if path=='/api/slides/local-batch':return self.reply(202,service.slides.local_batch(json.loads(data)))
                 if len(parts)==5 and parts[:3]==['api','slides','uploads'] and parts[4]=='finish':return self.reply(202,service.slides.finish(parts[3]))
                 if len(parts)==4 and parts[:2]==['api','slides'] and parts[3]=='run':return self.reply(202,service.slides.run(parts[2]))
                 if path == '/api/projects':

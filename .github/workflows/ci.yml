@@ -16,3 +16,4 @@ jobs:
       - run: python -m workbench.tests.http_smoke
       - run: node --check workbench/web/app.js
       - run: node --check workbench/web/slides.js
+      - run: node workbench/tests/test_sdpc_upload.js

@@ -97,6 +97,16 @@ def main():
             with zipfile.ZipFile(io.BytesIO(request('GET','/api/projects/'+child['id']+'/bundle'))) as archive:
                 assert child['id']+'/source_sdpc.json' in archive.namelist()
                 assert child['id']+'/slide_overview.jpg' in archive.namelist()
+            with patch.object(service.slides,'invoke',side_effect=fake_native):
+                paths=[Path(temporary)/'local-a.sdpc',Path(temporary)/'local-b.sdpc']
+                for p in paths:p.write_bytes(b'SDPCfixture')
+                imported=request('POST','/api/slides/local-batch',dict(paths=[str(paths[0]),str(Path(temporary)/'missing.sdpc'),str(paths[1]),str(paths[0])]),expected=202)
+                assert (imported['accepted'],imported['failed'],imported['duplicates'])==(2,1,1)
+                for _ in range(300):
+                    imported=request('GET','/api/slides/import-batches/'+imported['id'])
+                    if all(i.get('scan_status') not in ('queued','running','preparing_review') for i in imported['items']):break
+                    time.sleep(.02)
+                assert all(i.get('scan_status')=='completed' for i in imported['items'] if i['status']=='accepted'),imported
             request('POST',base+'/confirm',dict(stage='quality',revision=0),expected=409)
             request('POST',base+'/confirm',dict(stage='quality',revision=project['revision']),{'Origin':'http://other.example'},403)
             print('HTTP integration OK: SDPC chunks, automatic scanning, L0 linkage, source Range, five review stages, metrics and traceable ZIP export')

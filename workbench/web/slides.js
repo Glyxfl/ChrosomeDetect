@@ -1,7 +1,24 @@
 'use strict';
-let slideVisible=true,slideTimer=null,activeSlide=null,slideSelection=null,slidePage=0,slideFindings=[],sdpcUploading=false;
+let slideVisible=true,slideTimer=null,activeSlide=null,slideSelection=null,slidePage=0,slideFindings=[];
 let overviewImage=new Image();
 let slideView=null,slideDrag=null,regionImage=null,regionBox=null,regionTimer=null,regionBusy=false,regionKey='';
+let uploadQueueTimer=null;
+const uploadQueue=new SdpcUploadQueue({
+  api,storage:localStorage,
+  async sendChunk(id,offset,blob){
+    const response=await fetch('/api/slides/uploads/'+id+'/chunk',{method:'POST',headers:{'X-Offset':String(offset)},body:blob});
+    const data=await response.json();if(!response.ok){const e=new Error(data.error||'分块上传失败');e.status=response.status;throw e;}return data;
+  },
+  onChange(){if(!uploadQueueTimer)uploadQueueTimer=setTimeout(()=>{uploadQueueTimer=null;renderUploadQueue();},100);},
+  async onQueued(slide){if(!activeSlide){activeSlide=slide;slideView=null;}await refreshSlides();}
+});
+function renderUploadQueue(){
+  const rows=uploadQueue.items;const count=status=>rows.filter(r=>r.status===status).length;
+  $('sdpcUploadQueue').hidden=!rows.length;
+  $('uploadQueueSummary').textContent=`共 ${rows.length} 个文件 · 待上传 ${count('pending')} · 上传中 ${count('uploading')} · 已入识别队列 ${count('queued')} · 失败 ${count('failed')+count('invalid')}`;
+  $('retryAllUploads').disabled=!count('failed');
+  $('uploadQueueRows').innerHTML=rows.map((r,i)=>`<tr><td>${escapeHTML(r.name)}<small>${(r.size/1024**3).toFixed(2)} GiB</small></td><td><progress max="${r.size||1}" value="${r.uploaded}"></progress> ${r.size?(r.uploaded/r.size*100).toFixed(1):'0'}%</td><td>${{pending:'等待上传',uploading:'上传中',queued:'上传完成，已提交识别',failed:'上传失败，可重试',invalid:'文件无效'}[r.status]}<small>${escapeHTML(r.error||'')}</small></td><td>${r.status==='failed'?`<button data-retry-upload="${i}">重试 / 续传</button>`:''}</td></tr>`).join('');
+}
 const slideStates={uploading:'上传中',imported:'已导入',queued:'等待识别',running:'自动识别中',preparing_review:'准备簇图复核',completed:'全片提取完成',completed_partial:'局部提取完成',completed_with_issues:'完成，有失败簇',failed:'识别失败',interrupted:'已中断，可继续'};
 function slideMessage(text,success=false){$('slideMessage').hidden=!text;$('slideMessage').textContent=text;$('slideMessage').className='message'+(success?' success':'');}
 function leaveSlides(){slideVisible=false;clearTimeout(slideTimer);clearTimeout(regionTimer);}
@@ -16,6 +33,10 @@ async function refreshSlides(){
   clearTimeout(slideTimer);
   const slides=await api('/api/slides');
   $('slideRows').innerHTML=slides.map(s=>`<tr><td><button data-slide="${s.id}">${escapeHTML(s.name)}</button><small>${(s.size/1024**3).toFixed(2)} GiB · ${s.id.slice(0,10)}</small></td><td>${slideStates[s.status]||escapeHTML(s.status)}${s.partial?' / 局部':''}<small>${escapeHTML(s.error||s.progress||'')}</small></td><td>${s.cluster_count||0}</td><td>${s.machine_seconds===undefined?'处理中 / 待完成':s.machine_seconds.toFixed(1)+' s'}</td><td>${['failed','interrupted'].includes(s.status)?`<button data-resume="${s.id}">继续扫描</button>`:''}<a class="crop-download" href="/api/slides/${s.id}/log" target="_blank" rel="noopener">扫描日志</a></td></tr>`).join('')||'<tr><td colspan="5">请导入 .sdpc 原始切片，导入后会自动开始识别。</td></tr>';
+  const byId=new Map(slides.map(s=>[s.id,s]));
+  for(const button of $('slideRows').querySelectorAll('[data-slide]')){
+    const source=byId.get(button.dataset.slide);if(source?.relative_path)button.textContent=source.relative_path;
+  }
   if(activeSlide){
     activeSlide=await api('/api/slides/'+activeSlide.id);
     slideFindings=await api('/api/slides/'+activeSlide.id+'/findings');renderSlide();
@@ -52,36 +73,30 @@ function paintSlide(){
   const selected=(activeSlide.clusters||[]).find(c=>c.project_id===slideSelection);$('slideLocation').textContent=selected?'所选簇 '+selected.id+' · L0 '+selected.crop_box_l0.join(', '):'概览用于定位；复核查看 L0 原始簇图';
 }
 async function uploadSdpc(files){
-  files=Array.from(files||[]);if(!files.length||sdpcUploading)return;
-  sdpcUploading=true;$('slideUpload').disabled=true;const ids=[],errors=[];
-  try{
-    await showSlides();
-    for(const file of files){
-      try{
-        if(!file.name.toLowerCase().endsWith('.sdpc'))throw new Error('导入数据必须为 .sdpc 文件');
-        const key='sdpc-upload:'+JSON.stringify([file.name,file.size,file.lastModified]);let state=null;
-        const saved=localStorage.getItem(key);if(saved){try{state=await api('/api/slides/uploads/'+saved);}catch{localStorage.removeItem(key);}}
-        if(!state||state.status!=='uploading')state=await api('/api/slides/uploads',{name:file.name,size:file.size});
-        localStorage.setItem(key,state.id);let offset=state.uploaded_bytes||0,retries=0;
-        while(offset<file.size){
-          slideMessage(`${file.name} · 上传 ${(offset/file.size*100).toFixed(1)}%（支持中断后重新选择同一文件继续）`);
-          try{
-            const response=await fetch('/api/slides/uploads/'+state.id+'/chunk',{method:'POST',headers:{'X-Offset':String(offset)},body:file.slice(offset,offset+8*1024*1024)});
-            const data=await response.json();if(!response.ok)throw new Error(data.error);offset=data.uploaded_bytes;retries=0;
-          }catch(e){if(++retries>3)throw e;const resume=await api('/api/slides/uploads/'+state.id);offset=resume.uploaded_bytes;}
-        }
-        const slide=await api('/api/slides/uploads/'+state.id+'/finish',{});localStorage.removeItem(key);ids.push(slide.id);activeSlide=slide;slideView=null;regionImage=null;regionBox=null;regionKey='';
-      }catch(e){errors.push(file.name+'：'+e.message);}
-    }
-    slideMessage(`已导入 ${ids.length}/${files.length} 个 SDPC，自动提簇任务已入队。${errors.join('；')}`,!errors.length);await refreshSlides();
-  }finally{sdpcUploading=false;$('slideUpload').disabled=false;$('slideUpload').value='';}
+  files=Array.from(files||[]);if(!files.length)return;
+  await showSlides();const result=uploadQueue.add(files);renderUploadQueue();
+  slideMessage(`加入 ${result.added} 个文件，跳过 ${result.duplicates} 个重复项。可继续添加文件；每份上传完成后自动开始排队识别。`,true);
+  $('slideUpload').value='';$('slideFolder').value='';await uploadQueue.start();renderUploadQueue();
 }
 $('slidesNav').onclick=()=>showSlides().catch(e=>slideMessage(e.message));
 $('slideUpload').onchange=e=>uploadSdpc(e.target.files).catch(e=>slideMessage(e.message));
+$('slideFolder').onchange=e=>{
+  const all=Array.from(e.target.files),files=all.filter(f=>/\.sdpc$/i.test(f.name));
+  if(!files.length){slideMessage('所选文件夹中没有 SDPC 文件');return;}
+  uploadSdpc(files).catch(e=>slideMessage(e.message));
+};
+$('uploadQueueRows').onclick=e=>{if(e.target.dataset.retryUpload!==undefined)uploadQueue.retry(uploadQueue.items[Number(e.target.dataset.retryUpload)].key);};
+$('retryAllUploads').onclick=()=>{for(const r of uploadQueue.items)if(r.status==='failed'){r.status='pending';r.error='';}renderUploadQueue();uploadQueue.start();};
 $('refreshSlides').onclick=()=>refreshSlides().catch(e=>slideMessage(e.message));
 $('localImport').onclick=async()=>{
   $('localImport').disabled=true;
-  try{activeSlide=await api('/api/slides/local',{path:$('localSdpc').value});slideView=null;regionImage=null;regionBox=null;regionKey='';slideMessage('SDPC 已登记，自动提簇任务已入队。',true);await refreshSlides();}
+  try{
+    const paths=$('localSdpc').value.split(/\r?\n/).map(p=>p.trim()).filter(Boolean);
+    const batch=await api('/api/slides/local-batch',{paths});
+    slideMessage(`批次 ${batch.id.slice(0,10)}：已接收 ${batch.accepted}，失败 ${batch.failed}，重复跳过 ${batch.duplicates}。`,!batch.failed);
+    $('localBatchResults').hidden=false;$('localBatchResults').innerHTML='<div class="panel-heading"><strong>本地 SDPC 批量导入结果</strong></div><table><tbody>'+batch.items.map(r=>`<tr><td>${escapeHTML(r.path)}</td><td>${r.status==='accepted'?'已进入识别队列':r.status==='duplicate'?'重复，已跳过':'导入失败'}<small>${escapeHTML(r.error||'')}</small></td></tr>`).join('')+'</tbody></table>';
+    await refreshSlides();
+  }
   catch(e){slideMessage(e.message);}finally{$('localImport').disabled=false;}
 };
 $('slideRows').onclick=e=>{

@@ -4,7 +4,7 @@
 
 ## 工作流程
 
-1. 导入单个或多个 `.sdpc`，支持分块上传续传及服务端本地路径免复制。导入结束自动开始金字塔分块检测、跨块合并与原切片 L0 无损簇图导出，不需要先转成图片。扫描中显示进度，失败/中断可按原配置继续。
+1. 点击“批量选择 SDPC 文件”多选文件，或“选择文件夹”递归选取其中的 SDPC；也可每行填写一个服务端本地路径，一次登记最多 200 条，免复制大文件。上传队列显示每个文件的进度、状态和失败原因，支持继续添加、失败单项/批量重试和 8 MiB 分块续传。上传完成即进入自动识别队列，一个文件失败不阻断其余文件；重复项会跳过。导入结束自动进行金字塔分块检测、跨块合并和 L0 无损簇图导出。
 2. 切片任务中预览检出簇并在原切片定位，进入簇图质量及人工复核。没有质量模型时明确使用规则。质量不可用可归档，不能继续后续分析。簇图内可调整候选框、补齐漏检并排除误检；完整真值只针对该裁图，不等于全切片完整真值。
 3. 对簇进行 MI / 非 MI / 不可判读分类，确认目标 MI。
 4. 在目标簇内提取具体染色体候选，保存原图坐标、轮廓、所属簇及 ID；可使用 `INSTANCE_WEIGHTS` 指定单条染色体 YOLO 检测/分割模型，未配置则使用需复核的连通区域算法。人工可选择所属簇、补框和排除误检，确认完整真值后计算候选识别指标。
@@ -61,6 +61,8 @@ python -m workbench.pipeline test --config workbench/configs/phase.json --weight
 | POST `/api/slides/uploads/:id/chunk` | 原始二进制分块，最大 8 MiB，X-Offset 为起点 |
 | POST `/api/slides/uploads/:id/finish` | 完成上传并自动入队全片提簇 |
 | POST `/api/slides/local` | 服务端已有 SDPC 路径 path，免复制并自动提簇 |
+| POST `/api/slides/local-batch` | paths 数组，1–200 条路径，逐项登记、去重、隔离失败并自动提簇 |
+| GET `/api/slides/import-batches/:id` | 持久保存的本地导入批次及逐文件扫描状态 |
 | GET `/api/slides`、`/api/slides/:id` | 切片任务摘要 / 检出簇、来源和扫描范围 |
 | POST `/api/slides/:id/run` | 对失败或中断的切片按原参数继续扫描 |
 | GET `/api/slides/:id/overview` | 小尺寸金字塔概览 |
@@ -90,6 +92,7 @@ python -m unittest discover -s workbench/tests -v
 python -m workbench.tests.http_smoke
 node --check workbench/web/app.js
 node --check workbench/web/slides.js
+node workbench/tests/test_sdpc_upload.js
 ```
 
 测试使用临时合成图像与数据，不修改业务标注。单分类测试会在临时目录执行 1 epoch；合成测试只验证流程，不衡量真实图像效果。CPU/GPU 模型加载时间计入单张机器耗时，人工和队列等待另列或排除。

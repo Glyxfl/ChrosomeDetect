@@ -49,7 +49,7 @@ class Slides:
         identifier=uuid.uuid4().hex;folder=root/identifier;folder.mkdir()
         # Readiness lives in SQLite; one file avoids a multi-GB completion copy.
         (folder/'source.sdpc').touch()
-        record=dict(id=identifier,name=name,size=size,uploaded_bytes=0,status='uploading',source_mode='upload',created_at=now(),cluster_count=0)
+        record=dict(id=identifier,name=name,relative_path=str(body.get('relative_path',name))[:1000],size=size,uploaded_bytes=0,status='uploading',source_mode='upload',created_at=now(),cluster_count=0)
         self.store.record('slides',record)
         return record
 
@@ -84,12 +84,41 @@ class Slides:
     def finish(self,identifier):
         with self.lock:
             slide=self.get(identifier)
-            if slide['status']!='uploading':return slide
-            folder=self.folder(identifier);path=folder/'source.sdpc'
-            if path.stat().st_size!=slide['size']:raise ValueError('SDPC 尚未上传完整')
-            slide.update(source_path=str(path.resolve()),status='imported',options={})
-            self.store.record('slides',slide)
+            if slide['status'] not in ('uploading','imported'):return slide
+            if slide['status']=='uploading':
+                folder=self.folder(identifier);path=folder/'source.sdpc'
+                if path.stat().st_size!=slide['size']:raise ValueError('SDPC 尚未上传完整')
+                slide.update(source_path=str(path.resolve()),status='imported',options={})
+                self.store.record('slides',slide)
         return self.run(identifier)
+
+    def local_batch(self,body):
+        paths=body.get('paths')
+        if not isinstance(paths,list) or not 1<=len(paths)<=200 or any(not isinstance(p,str) or not p.strip() for p in paths):
+            raise ValueError('请提供 1–200 条非空 SDPC 路径')
+        batch=dict(id=uuid.uuid4().hex,created_at=now(),items=[]);seen=set()
+        for raw in paths:
+            path=raw.strip().strip('"')
+            try:
+                key=os.path.normcase(str(Path(path).expanduser().resolve()))
+                if key in seen:
+                    batch['items'].append(dict(path=path,status='duplicate',error='本批次路径重复，已跳过'));continue
+                seen.add(key)
+                slide=self.local(dict(path=path))
+                batch['items'].append(dict(path=path,status='accepted',slide_id=slide['id']))
+            except (ValueError,OSError,KeyError) as exc:batch['items'].append(dict(path=path,status='failed',error=str(exc)))
+        self.store.record('slide_import_batches',batch)
+        return self.import_batch(batch['id'])
+
+    def import_batch(self,identifier):
+        batch=next((b for b in self.store.records('slide_import_batches') if b['id']==identifier),None)
+        if not batch:raise KeyError('SDPC 导入批次不存在')
+        for item in batch['items']:
+            if item.get('slide_id'):item['scan_status']=self.get(item['slide_id'])['status']
+        batch['accepted']=sum(i['status']=='accepted' for i in batch['items'])
+        batch['failed']=sum(i['status']=='failed' for i in batch['items'])
+        batch['duplicates']=sum(i['status']=='duplicate' for i in batch['items'])
+        return batch
 
     def local(self,body):
         source=Path(str(body.get('path',''))).expanduser().resolve()

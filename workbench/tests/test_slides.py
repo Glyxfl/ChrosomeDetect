@@ -10,6 +10,22 @@ from workbench.service import Service
 from workbench.store import Conflict
 
 class SlideTests(unittest.TestCase):
+    def test_local_batch_isolates_failures_and_preserves_batch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);s=Service(root/'runtime')
+            first=root/'first.sdpc';second=root/'second.sdpc';first.write_bytes(b'fake');second.write_bytes(b'fake')
+            try:
+                with patch.object(s.slides,'invoke',side_effect=RuntimeError('SDK fixture')):
+                    batch=s.slides.local_batch(dict(paths=[str(first),str(root/'missing.sdpc'),str(second),str(first)]))
+                    s.pool.shutdown(wait=True)
+                self.assertEqual((batch['accepted'],batch['failed'],batch['duplicates']),(2,1,1))
+                self.assertEqual(len(s.store.records('slides')),2)
+                self.assertEqual(s.slides.import_batch(batch['id'])['accepted'],2)
+                self.assertEqual(len([j for j in s.jobs.values() if j['stage']=='sdpc_detection']),2)
+                for identifier in (r['slide_id'] for r in batch['items'] if r.get('slide_id')):
+                    self.assertEqual(s.slides.get(identifier)['status'],'failed')
+            finally:s.pool.shutdown(wait=True)
+
     def test_chunk_offsets_incomplete_and_rollback(self):
         with tempfile.TemporaryDirectory() as folder:
             s=Service(Path(folder))

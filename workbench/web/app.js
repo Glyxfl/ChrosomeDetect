@@ -13,7 +13,7 @@ const escapeHTML = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&l
 async function api(url, body, extra={}) {
   const response = await fetch(url, body === undefined ? extra : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),...extra});
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '请求失败');
+  if (!response.ok) {const error=new Error(data.error || '请求失败');error.status=response.status;throw error;}
   return data;
 }
 function message(text, success=false) { $('message').hidden = !text; $('message').textContent=text; $('message').className='message'+(success?' success':''); }
