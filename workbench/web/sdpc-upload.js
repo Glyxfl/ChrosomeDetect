@@ -8,7 +8,7 @@
     constructor({api,sendChunk,storage,onChange=()=>{},onQueued=()=>{}}){
       Object.assign(this,{api,sendChunk,storage,onChange,onQueued});this.items=[];this.running=null;
     }
-    add(files){
+    add(files,options={}){
       let added=0,duplicates=0;
       for(const file of files){
         const relative=file.webkitRelativePath||file.name;
@@ -16,7 +16,7 @@
         const old=this.items.find(r=>r.key===key);
         if(old){if(old.status==='failed'){old.status='pending';old.error='';added++;}else duplicates++;continue;}
         const valid=/\.sdpc$/i.test(file.name)&&file.size>0;
-        this.items.push({key,file,name:relative,size:file.size,uploaded:0,status:valid?'pending':'invalid',error:valid?'':'必须为非空 SDPC 文件'});added++;
+        this.items.push({key,file,name:relative,size:file.size,options:{...options},uploaded:0,status:valid?'pending':'invalid',error:valid?'':'必须为非空 SDPC 文件'});added++;
       }
       this.onChange(this.items);return {added,duplicates};
     }
@@ -46,7 +46,7 @@
         catch(e){if(e.status!==404)throw e;this.remove(row.key);this.remove(legacy);}
       }
       if(state&&(state.size!==row.size||state.name!==row.file.name))throw new Error('保存的上传记录与当前文件不一致');
-      if(!state)state=await this.api('/api/slides/uploads',{name:row.file.name,size:row.size,relative_path:row.name});
+      if(!state)state=await this.api('/api/slides/uploads',{name:row.file.name,size:row.size,relative_path:row.name,...row.options});
       row.uploadId=state.id;this.save(row.key,state.id);
       if(state.status==='uploading'){
         let offset=state.uploaded_bytes||0,retries=0;row.uploaded=offset;this.onChange(this.items);

@@ -20,6 +20,9 @@ function harness(){
 }
 async function main(){
   let h=harness(),q=new Queue(h);
+  q.add([file('mode.sdpc')],{scan_mode:'full'});await q.start();
+  assert.equal(h.states.get(q.items[0].slideId).scan_mode,'full');
+  h=harness();q=new Queue(h);
   q.add([file('a.sdpc',8*1024*1024+3),file('b.SDPC'),file('bad.png'),file('a.sdpc',8*1024*1024+3)]);await q.start();
   assert.deepEqual(q.items.map(r=>r.status),['queued','queued','invalid']);assert.equal(h.calls.begin,2);assert.equal(h.calls.chunks.length,3);
 
@@ -38,6 +41,6 @@ async function main(){
   q=new Queue({...h,sendChunk:async(...args)=>{if(first){first=false;await gate;}return h.sendChunk(...args);}});
   q.add([file('first.sdpc')]);const running=q.start();await Promise.resolve();q.add([file('added-later.sdpc')]);release();await running;
   assert.deepEqual(q.items.map(r=>r.status),['queued','queued']);assert.equal(h.calls.begin,2);
-  console.log('6 SDPC upload queue scenarios passed: chunks, duplicates, failure isolation, resume, lost ACK and live additions');
+  console.log('7 SDPC upload queue scenarios passed: mode, chunks, duplicates, failure isolation, resume, lost ACK and live additions');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

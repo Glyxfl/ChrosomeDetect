@@ -14,6 +14,8 @@ from PIL import ImageEnhance
 from .slide_io import Slide
 from .native_decode import decode_tiles
 from .progress import scan_progress
+from .pyramid import plan_tiles,select_fine_tiles
+from .coarse import coarse_proposals
 
 def positions(length, tile, overlap):
     if length <= tile:return [0]
@@ -103,6 +105,10 @@ def main():
     p.add_argument('--weights',type=Path,default=runtime.HOME/'weights/chromosome_cluster.pt')
     p.add_argument('--output',type=Path,default=runtime.HOME/'results')
     p.add_argument('--levels',nargs='+',type=int,default=[1,2])
+    p.add_argument('--scan-mode',choices=['pyramid','full'],default='full')
+    p.add_argument('--coarse-level',type=int,default=3)
+    p.add_argument('--coarse-conf',type=float,default=.35)
+    p.add_argument('--coarse-padding',type=int,default=1024,help='Expand coarse proposals in L0 pixels before selecting fine tiles')
     p.add_argument('--tile',type=int,default=1536)
     p.add_argument('--overlap',type=int,default=512)
     p.add_argument('--imgsz',type=int,default=1024)
@@ -120,6 +126,8 @@ def main():
     if not 0<=args.overlap<args.tile:p.error('overlap must be nonnegative and less than tile')
     if args.padding<0 or args.batch<1 or args.tile<64 or args.imgsz<32 or args.limit<0 or not 0<=args.decode_workers<=4:p.error('Invalid image sizes, padding, batch, decode-workers or limit')
     if not 0<args.conf<1:p.error('conf must be between zero and one')
+    if not 0<args.coarse_conf<1 or args.coarse_padding<0:p.error('Invalid coarse threshold or padding')
+    if args.scan_mode=='pyramid' and args.coarse_level<=max(args.levels):p.error('Coarse level must be above all fine levels')
     args.slide=args.slide.resolve();args.weights=args.weights.resolve();args.output=args.output.resolve()
     if not args.weights.is_file():raise FileNotFoundError(f'Trained weights missing: {args.weights}')
     if not args.slide.is_file():raise FileNotFoundError(args.slide)
@@ -128,6 +136,7 @@ def main():
     out=args.output;out.mkdir(parents=True,exist_ok=True)
     checkpoint=out/'tiles.jsonl';configfile=out/'run_config.json'
     signature=dict(slide=str(args.slide),slide_bytes=args.slide.stat().st_size,slide_mtime=args.slide.stat().st_mtime_ns,weights_sha256=hashlib.sha256(args.weights.read_bytes()).hexdigest(),levels=args.levels,tile=args.tile,overlap=args.overlap,imgsz=args.imgsz,conf=args.conf,roi=args.roi,limit=args.limit,padding=args.padding,processed=args.processed)
+    if args.scan_mode=='pyramid':signature.update(scan_mode='pyramid',coarse_level=args.coarse_level,coarse_conf=args.coarse_conf,coarse_padding=args.coarse_padding)
     done=set();detections=[]
     if configfile.exists():
         if not args.resume:raise FileExistsError(f'{out} already contains a run. Choose a new output or --resume.')
@@ -149,28 +158,25 @@ def main():
             checkpoint.write_text(''.join(s+'\n' for s in valid_lines),encoding='utf-8')
     else:configfile.write_text(json.dumps(signature,indent=2),encoding='utf-8')
     started=time.perf_counter();last=0;skipped_blank=0;initial_completed=len(done)
-    acceleration=dict(device=args.device,decode_workers=args.decode_workers,batch_size=args.batch)
+    acceleration=dict(device=args.device,decode_workers=args.decode_workers,batch_size=args.batch,scan_mode=args.scan_mode)
     print('ACCELERATION '+json.dumps(acceleration),flush=True)
     with Slide(args.slide) as slide:
         w0,h0=slide.dimensions[0]
         roi=args.roi or [0,0,w0,h0]
         if not (0<=roi[0]<roi[2]<=w0 and 0<=roi[1]<roi[3]<=h0):raise ValueError('ROI is outside L0 slide dimensions')
-        tiles=[]
-        for level in dict.fromkeys(args.levels):
-            if level<1 or level>=len(slide.dimensions):raise ValueError(f'Invalid input level {level}; use native pyramid levels L1 and above')
-            ds=slide.downsamples[level]
-            # Align origins to native pyramid pixels and clamp to both level and L0 bounds.
-            x0,y0=int(roi[0]//ds),int(roi[1]//ds)
-            x1=min(slide.dimensions[level][0],int(math.ceil(roi[2]/ds)),int(w0//ds))
-            y1=min(slide.dimensions[level][1],int(math.ceil(roi[3]/ds)),int(h0//ds))
-            width,height=min(args.tile,x1-x0),min(args.tile,y1-y0)
-            for y in positions(y1-y0,height,min(args.overlap,height-1)):
-                for x in positions(x1-x0,width,min(args.overlap,width-1)):
-                    gx,gy=int((x+x0)*ds),int((y+y0)*ds)
-                    tiles.append(dict(key=f'L{level}_{gx}_{gy}_{width}_{height}',level=level,origin=[gx,gy],width=width,height=height))
+        tiles=plan_tiles(slide,roi,args.levels,args.tile,args.overlap)
+        exhaustive_tile_count=len(tiles);coarse_stats=None;proposal_count=0
+        if args.scan_mode=='pyramid':
+            coarse_tiles=plan_tiles(slide,roi,[args.coarse_level],args.tile,args.overlap)
+            proposals,coarse_stats=coarse_proposals(model,slide,args,coarse_tiles,detect_batch)
+            proposal_count=len(proposals)
+            tiles=select_fine_tiles(tiles,proposals,slide.downsamples,args.coarse_padding)
+            print(f'FINE_PLAN {len(tiles)}/{exhaustive_tile_count} fine tiles selected from {proposal_count} coarse proposals',flush=True)
         total_full=len(tiles)
         if args.limit:tiles=tiles[:args.limit]
         total=len(tiles);batch=[]
+        # Fine-stage ETA excludes the already completed coarse pass.
+        scan_started=time.perf_counter();last=0
         def record(rows,fp):
             for r in rows:
                 fp.write(json.dumps(r)+'\n');done.add(r['tile_key']);detections.extend(r['detections'])
@@ -188,13 +194,13 @@ def main():
                 if len(batch)>=args.batch:
                     record(detect_batch(model,batch,slide,args),fp);batch=[]
                 if time.perf_counter()-last>20:
-                    stats=scan_progress(len(done),total,initial_completed,time.perf_counter()-started)
+                    stats=scan_progress(len(done),total,initial_completed,time.perf_counter()-scan_started)
                     print(f'SCAN {len(done)}/{total} tiles; {len(detections)} raw predictions; elapsed {stats["session_seconds"]:.0f}s',flush=True)
                     print('PROGRESS '+json.dumps(stats),flush=True);last=time.perf_counter()
             if batch:record(detect_batch(model,batch,slide,args),fp)
-        stats=scan_progress(len(done),total,initial_completed,time.perf_counter()-started)
+        stats=scan_progress(len(done),total,initial_completed,time.perf_counter()-scan_started)
         print('PROGRESS '+json.dumps(dict(stats,stage='merge',estimated_remaining_seconds=None)),flush=True)
-        scan_seconds=time.perf_counter()-started
+        scan_seconds=time.perf_counter()-scan_started
         print(f'MERGE {len(detections)} raw predictions',flush=True)
         clusters=recover_boundaries(model,merge_detections(detections),slide,args)
         rawdir=out/'L0_original';rawdir.mkdir(exist_ok=True)
@@ -214,7 +220,14 @@ def main():
             manifest.append(recordrow)
         summary=dict(slide=str(args.slide),slide_dimensions_l0=[w0,h0],pyramid_dimensions=slide.dimensions,downsamples=slide.downsamples,scan_roi_l0=roi,levels=args.levels,tiles_completed=len(done),tiles_planned=total,tiles_full_roi=total_full,raw_predictions=len(detections),exported_clusters=len(manifest),partial_run=total<total_full,full_slide_run=total==total_full and roi==[0,0,w0,h0],saved_level=0,resized=False,lossless_png=True,elapsed_seconds=round(time.perf_counter()-started,1),model_status=args.model_label+'; detections require quality review; scores are not calibrated probabilities',blank_tiles_skipped_this_session=skipped_blank)
         summary.update(skipped_exports=skipped_exports,acceleration=acceleration,
-                       scan_seconds_this_session=round(scan_seconds,2),
+                       scan_mode=args.scan_mode,coarse_level=args.coarse_level if coarse_stats else None,
+                       coarse_progress=coarse_stats,coarse_proposals=proposal_count,
+                       exhaustive_scan=args.scan_mode=='full',
+                       exhaustive_fine_tiles=exhaustive_tile_count,selected_fine_tiles=total_full,
+                       recall_validation='unvalidated_pyramid_gating' if coarse_stats else 'exhaustive_grid_not_a_recall_claim',
+                       scan_seconds_this_session=round(scan_seconds+(coarse_stats['session_seconds'] if coarse_stats else 0),2),
+                       fine_scan_seconds_this_session=round(scan_seconds,2),
+                       coarse_scan_seconds_this_session=coarse_stats['session_seconds'] if coarse_stats else 0,
                        session_tiles=len(done)-initial_completed,resumed_tiles=initial_completed,
                        scan_tiles_per_second=stats['tiles_per_second'])
         (out/'detections.json').write_text(json.dumps(dict(summary=summary,clusters=manifest),ensure_ascii=False,indent=2),encoding='utf-8')

@@ -41,6 +41,7 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('command',choices=['inspect','scan','region']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--weights',type=Path);p.add_argument('--roi',nargs=4,type=int);p.add_argument('--limit',type=int,default=0)
     p.add_argument('--resume',action='store_true');p.add_argument('--box',nargs=4,type=int);p.add_argument('--level',type=int,default=0)
+    p.add_argument('--scan-mode',choices=['pyramid','full'],default=os.environ.get('SDPC_SCAN_MODE','full'))
     a=p.parse_args()
     if a.command=='inspect':inspect(a.source,a.output)
     elif a.command=='region':region(a.source,a.output,a.box,a.level)
@@ -48,11 +49,15 @@ def main():
         import torch
         from .detect_slide import main as detect
         # Separate SDK handles in bounded worker processes overlap decode and GPU
-        # inference. Keep batch 2 on 4 GiB cards; do not reduce scan coverage.
+        # inference. Keep batch 2 on 4 GiB cards; preserve the selected scan grid.
         workers=int(os.environ.get('SDPC_DECODE_WORKERS',min(2,max(0,(os.cpu_count() or 1)-1))))
         batch=int(os.environ.get('SDPC_BATCH_SIZE','2'))
+        mode=a.scan_mode
+        # Existing exhaustive checkpoints retain their original coverage.
+        if a.resume and (a.output/'run_config.json').exists():
+            mode=json.loads((a.output/'run_config.json').read_text(encoding='utf-8')).get('scan_mode','full')
         sys.argv=['sdpc-detect',str(a.source),'--output',str(a.output),'--weights',str(a.weights),'--device','0' if torch.cuda.is_available() else 'cpu',
-                  '--decode-workers',str(workers),'--batch',str(batch)]
+                  '--decode-workers',str(workers),'--batch',str(batch),'--scan-mode',mode]
         if a.roi:sys.argv.extend(['--roi',*map(str,a.roi)])
         if a.limit:sys.argv.extend(['--limit',str(a.limit)])
         if a.resume:sys.argv.append('--resume')

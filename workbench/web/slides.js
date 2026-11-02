@@ -27,6 +27,7 @@ function slideTiming(s){
   if(s.status==='queued')return '排队中';
   const p=s.scan_progress;
   if(!p)return '处理中 / 待测量';
+  if(p.stage==='coarse')return `高层粗筛 ${p.tiles_completed}/${p.tiles_planned} · ${p.tiles_per_second.toFixed(2)} 图块/s<small>粗筛后计算精检范围及剩余时间</small>`;
   if(p.stage!=='scan')return `扫描完成，合并 / 裁图 / 准备复核中`;
   const eta=p.estimated_remaining_seconds;
   return `本轮扫描 ${p.session_seconds.toFixed(0)} s · ${p.tiles_per_second.toFixed(2)} 图块/s<small>${eta==null?'正在估算':`扫描预计剩余 ${Math.ceil(eta/60)} 分钟`}（另需合并、裁图、准备复核）</small>`;
@@ -41,7 +42,7 @@ async function showSlides(id=null,projectId=null){
 async function refreshSlides(){
   clearTimeout(slideTimer);
   const slides=await api('/api/slides');
-  $('slideRows').innerHTML=slides.map(s=>`<tr><td><button data-slide="${s.id}">${escapeHTML(s.name)}</button><small>${(s.size/1024**3).toFixed(2)} GiB · ${s.id.slice(0,10)}</small></td><td>${slideStates[s.status]||escapeHTML(s.status)}${s.partial?' / 局部':''}<small>${escapeHTML(s.error||s.progress||'')}</small></td><td>${s.cluster_count||0}</td><td>${slideTiming(s)}</td><td>${['failed','interrupted'].includes(s.status)?`<button data-resume="${s.id}">继续扫描</button>`:''}<a class="crop-download" href="/api/slides/${s.id}/log" target="_blank" rel="noopener">扫描日志</a></td></tr>`).join('')||'<tr><td colspan="5">请导入 .sdpc 原始切片，导入后会自动开始识别。</td></tr>';
+  $('slideRows').innerHTML=slides.map(s=>`<tr><td><button data-slide="${s.id}">${escapeHTML(s.name)}</button><small>${(s.size/1024**3).toFixed(2)} GiB · ${s.id.slice(0,10)}</small></td><td>${slideStates[s.status]||escapeHTML(s.status)}${s.partial?' / 局部':''}${s.scan_mode==='pyramid'?' / 高层粗筛（检出率待验证）':''}<small>${escapeHTML(s.error||s.progress||'')}</small></td><td>${s.cluster_count||0}</td><td>${slideTiming(s)}</td><td>${['failed','interrupted'].includes(s.status)?`<button data-resume="${s.id}">继续扫描</button>`:''}<a class="crop-download" href="/api/slides/${s.id}/log" target="_blank" rel="noopener">扫描日志</a></td></tr>`).join('')||'<tr><td colspan="5">请导入 .sdpc 原始切片，导入后会自动开始识别。</td></tr>';
   const byId=new Map(slides.map(s=>[s.id,s]));
   for(const button of $('slideRows').querySelectorAll('[data-slide]')){
     const source=byId.get(button.dataset.slide);if(source?.relative_path)button.textContent=source.relative_path;
@@ -83,7 +84,7 @@ function paintSlide(){
 }
 async function uploadSdpc(files){
   files=Array.from(files||[]);if(!files.length)return;
-  await showSlides();const result=uploadQueue.add(files);renderUploadQueue();
+  await showSlides();const result=uploadQueue.add(files,{scan_mode:$('sdpcScanMode').value});renderUploadQueue();
   slideMessage(`加入 ${result.added} 个文件，跳过 ${result.duplicates} 个重复项。可继续添加文件；每份上传完成后自动开始排队识别。`,true);
   $('slideUpload').value='';$('slideFolder').value='';await uploadQueue.start();renderUploadQueue();
 }
@@ -101,7 +102,7 @@ $('localImport').onclick=async()=>{
   $('localImport').disabled=true;
   try{
     const paths=$('localSdpc').value.split(/\r?\n/).map(p=>p.trim()).filter(Boolean);
-    const batch=await api('/api/slides/local-batch',{paths});
+    const batch=await api('/api/slides/local-batch',{paths,scan_mode:$('sdpcScanMode').value});
     slideMessage(`批次 ${batch.id.slice(0,10)}：已接收 ${batch.accepted}，失败 ${batch.failed}，重复跳过 ${batch.duplicates}。`,!batch.failed);
     $('localBatchResults').hidden=false;$('localBatchResults').innerHTML='<div class="panel-heading"><strong>本地 SDPC 批量导入结果</strong></div><table><tbody>'+batch.items.map(r=>`<tr><td>${escapeHTML(r.path)}</td><td>${r.status==='accepted'?'已进入识别队列':r.status==='duplicate'?'重复，已跳过':'导入失败'}<small>${escapeHTML(r.error||'')}</small></td></tr>`).join('')+'</tbody></table>';
     await refreshSlides();

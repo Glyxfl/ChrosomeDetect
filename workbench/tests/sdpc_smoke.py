@@ -8,10 +8,11 @@ import numpy as np
 from workbench.service import Service
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--roi',type=int,nargs=4,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--roi',type=int,nargs=4,required=True)
+    p.add_argument('--scan-mode',choices=['full','pyramid'],default='full');a=p.parse_args()
     service=Service(a.output)
     try:
-        slide=service.slides.local(dict(path=str(a.source),roi=a.roi))
+        slide=service.slides.local(dict(path=str(a.source),roi=a.roi,scan_mode=a.scan_mode))
         deadline=time.monotonic()+300
         while service.jobs[slide['job_id']]['status'] in ('queued','running') and time.monotonic()<deadline:time.sleep(.2)
         slide=service.slides.get(slide['id'])

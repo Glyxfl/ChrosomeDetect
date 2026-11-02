@@ -43,13 +43,14 @@ class Slides:
 
     def begin(self,body):
         name=self.filename(body.get('name',''));size=body.get('size')
+        mode=self.scan_mode(body)
         if not isinstance(size,int) or isinstance(size,bool) or not 1<=size<=MAX_BYTES:raise ValueError('SDPC 大小无效或超过配置上限')
         root=self.store.root/'slides';root.mkdir(exist_ok=True)
         if shutil.disk_usage(root).free<size+256*1024**2:raise ValueError('磁盘空间不足以接收该 SDPC')
         identifier=uuid.uuid4().hex;folder=root/identifier;folder.mkdir()
         # Readiness lives in SQLite; one file avoids a multi-GB completion copy.
         (folder/'source.sdpc').touch()
-        record=dict(id=identifier,name=name,relative_path=str(body.get('relative_path',name))[:1000],size=size,uploaded_bytes=0,status='uploading',source_mode='upload',created_at=now(),cluster_count=0)
+        record=dict(id=identifier,name=name,relative_path=str(body.get('relative_path',name))[:1000],size=size,uploaded_bytes=0,status='uploading',source_mode='upload',created_at=now(),cluster_count=0,options=dict(scan_mode=mode),scan_mode=mode)
         self.store.record('slides',record)
         return record
 
@@ -93,6 +94,7 @@ class Slides:
         return self.run(identifier)
 
     def local_batch(self,body):
+        mode=self.scan_mode(body)
         paths=body.get('paths')
         if not isinstance(paths,list) or not 1<=len(paths)<=200 or any(not isinstance(p,str) or not p.strip() for p in paths):
             raise ValueError('请提供 1–200 条非空 SDPC 路径')
@@ -104,7 +106,7 @@ class Slides:
                 if key in seen:
                     batch['items'].append(dict(path=path,status='duplicate',error='本批次路径重复，已跳过'));continue
                 seen.add(key)
-                slide=self.local(dict(path=path))
+                slide=self.local(dict(path=path,scan_mode=mode))
                 batch['items'].append(dict(path=path,status='accepted',slide_id=slide['id']))
             except (ValueError,OSError,KeyError) as exc:batch['items'].append(dict(path=path,status='failed',error=str(exc)))
         self.store.record('slide_import_batches',batch)
@@ -121,22 +123,31 @@ class Slides:
         return batch
 
     def local(self,body):
+        mode=self.scan_mode(body)
         source=Path(str(body.get('path',''))).expanduser().resolve()
         name=self.filename(source.name)
         if not source.is_file():raise ValueError('服务端找不到该 SDPC 文件')
         # Optional ROI/limit are explicit diagnostics, never the default import scope.
         options={k:body[k] for k in ('roi','limit') if k in body}
+        options['scan_mode']=mode
         if 'roi' in options and (not isinstance(options['roi'],list) or len(options['roi'])!=4 or not all(isinstance(v,int) for v in options['roi'])):raise ValueError('ROI 必须为四个 L0 整数坐标')
         if 'limit' in options and (not isinstance(options['limit'],int) or not 0<=options['limit']<=100000):raise ValueError('调试图块上限无效')
         identifier=uuid.uuid4().hex;(self.store.root/'slides'/identifier).mkdir(parents=True)
-        slide=dict(id=identifier,name=name,size=source.stat().st_size,source_path=str(source),source_mode='local_reference',status='imported',created_at=now(),options=options,partial=bool(options.get('roi') or options.get('limit')),cluster_count=0)
+        slide=dict(id=identifier,name=name,size=source.stat().st_size,source_path=str(source),source_mode='local_reference',status='imported',created_at=now(),options=options,scan_mode=mode,partial=bool(options.get('roi') or options.get('limit')),cluster_count=0)
         self.store.record('slides',slide)
         return self.run(identifier)
+
+    @staticmethod
+    def scan_mode(body):
+        mode=body.get('scan_mode',os.environ.get('SDPC_SCAN_MODE','full'))
+        if mode not in ('pyramid','full'):raise ValueError('扫描模式必须为 pyramid 或 full')
+        return mode
 
     def invoke(self,slide,command,output,job):
         args=[sys.executable,'-u','-m','workbench.sdpc.worker',command,'--source',slide['source_path'],'--output',str(output)]
         if command=='scan':
             args.extend(['--weights',str(model_paths()['clusters'])])
+            args.extend(['--scan-mode',slide.get('options',{}).get('scan_mode','full')])
             for key in ('roi','limit'):
                 value=slide.get('options',{}).get(key)
                 if value:args.extend(['--'+key,*map(str,value if isinstance(value,list) else [value])])
@@ -155,7 +166,8 @@ class Slides:
                         try:current['scan_progress']=json.loads(line[len('PROGRESS '):])
                         except (ValueError,TypeError):pass
                     if line.startswith('ACCELERATION '):
-                        try:current['acceleration']=json.loads(line[len('ACCELERATION '):])
+                        try:
+                            current['acceleration']=json.loads(line[len('ACCELERATION '):]);current['scan_mode']=current['acceleration'].get('scan_mode','full')
                         except (ValueError,TypeError):pass
                     self.store.record('slides',current)
                 code=process.wait()

@@ -108,11 +108,17 @@ SDPC 来源还导出 `source_sdpc.json`、切片概览、源文件 SHA-256、L0 
 
 ## 8. 验收与故障排查
 
-SDPC 自动扫描优先使用 CUDA GPU，CPU 通过独立 SDK 进程并行解码并预取图块。默认最多 2 个解码进程、推理 batch=2，适合本机 RTX 3050 4 GiB；无 CUDA 时自动使用 CPU 推理。每个进程独立打开 SDPC，预取队列有界，不改变 L1/L2 覆盖范围、分辨率或检测阈值。可在启动服务前设置 `SDPC_DECODE_WORKERS=0..4`（0 为串行）和 `SDPC_BATCH_SIZE`（正整数）。显存不足时减小 batch，磁盘繁忙时减少解码进程。
+SDPC 自动扫描优先使用 CUDA GPU，CPU 通过独立 SDK 进程并行解码并预取图块。默认最多 2 个解码进程、推理 batch=2，适合本机 RTX 3050 4 GiB；无 CUDA 时自动使用 CPU 推理。每个进程独立打开 SDPC，预取队列有界；并行本身不改变覆盖范围、分辨率或检测阈值。可在启动服务前设置 `SDPC_DECODE_WORKERS=0..4`（0 为串行）和 `SDPC_BATCH_SIZE`（正整数）。显存不足时减小 batch，磁盘繁忙时减少解码进程。
+
+网页导入时可选择实验快速模式 `pyramid` 或全量模式 `full`（新任务默认）。快速模式在原生 L3（本片为 L0 的 1/8 边长）重叠粗检，以 0.35 阈值生成 L0 候选框并向四周扩展 1024 个 L0 像素，只对相交的 L1/L2 图块精检。粗检结果单独保存在 `coarse_tiles.jsonl`，不会作为最终簇直接导出；最终框只来自精检并做跨块合并和边界补检。SDK 从 L0 读取完整矩形，内部处理跨存储瓦片区域，输出原始像素 PNG，不用缩略图放大或拼接低层预览。两阶段都支持断点；旧全量任务续扫仍使用原模式。
+
+高层粗筛沿用现有检测权重，尚未针对 L3 训练与验证。快速模式通过选择精检区域减少耗时，但小簇或低对比簇可能在粗筛被漏掉。页面及检测报告标记 `scan_mode`、`exhaustive_scan=false`、`recall_validation=unvalidated_pyramid_gating`，不可据此宣称检出率不变。`full_slide_run` 仅表示输入 ROI 覆盖整张切片且未用调试上限，不表示逐个精检瓦片全覆盖；判断后者用 `exhaustive_scan`。需要完整网格扫描时选择 `full`，或服务启动前设 `SDPC_SCAN_MODE=full`（网页显式选择优先）。API 的上传初始化、本地导入和批量路径导入支持 `scan_mode`。命令行可用 `--scan-mode pyramid --coarse-level 3 --coarse-conf .35 --coarse-padding 1024`；`--limit` 仅限制精检调试图块数，粗筛仍覆盖 ROI。粗筛进度的 ETA 仅覆盖粗筛，精检开始后重新计算扫描 ETA。完整耗时保存在切片 `machine_seconds`。报告的 `scan_seconds_this_session` 为本轮粗筛与精检之和，另以 `coarse_scan_seconds_this_session`、`fine_scan_seconds_this_session` 分开记录；图块/秒速率与精检 ETA 只针对精检瓦片。
 
 扫描日志输出 `ACCELERATION` 和 `PROGRESS` JSON，任务 API 同步返回 `acceleration`、`scan_progress`：已完成/总图块、当前运行处理图块数、扫描耗时、图块/秒、预计扫描剩余秒数。启动前 16 个图块不估算；续扫速度只按本轮新完成图块计算。预计剩余时间只覆盖扫描，合并、边界补检、L0 裁图和初次预标注另计。页面完成后显示实际累计处理耗时 `machine_seconds`；检测报告另有 `scan_seconds_this_session`、`elapsed_seconds`（本轮扫描及合并裁图）、`resumed_tiles`。批量任务逐文件统计，排队时间见 job 的 `queue_seconds`。
 
 本机 2026-11-02 对同一真实 SDPC 前 128 图块的对照：GPU + 串行解码 37.9 秒，GPU + 2 进程解码 19.8 秒，GPU + 4 进程解码 19.0 秒。选择 2 进程作为默认以降低内存与 CPU 占用。短测含模型首次推理开销，且这段没有检出簇，不能作为整片实际完成时长；33,428 图块按 2 进程短测线性估算扫描约 86 分钟，最终以整片任务实测记录为准。
+
+两阶段模式另在同片 60,000 × 60,000 个 L0 像素的区域做对照：全量精检 1,066 图块，检测、合并与裁图 173.4 秒、输出 313 个模型候选；快速模式粗筛 49 图块、精检 625 图块，计时 115.0 秒、输出 203 个候选，约快 1.51 倍。全量的 35 个分数 ≥ 0.8 候选中，快速结果仅有 22 个达到 IoU ≥ 0.5 匹配。这是模型结果对照，没有人工真值，不能作为准确率或检出率；候选减少说明仍有遗漏风险，所以保留全量默认。计时不含子进程启动、模型加载、源文件哈希；也不是整片完成时长。另一个已知含 3 个簇的小 ROI 在快速模式保留了 3 个簇，L0 输出与原始 SDPC 逐像素一致，不能据此推断全片召回率。
 
 ```text
 python -m unittest discover -s workbench/tests -v
