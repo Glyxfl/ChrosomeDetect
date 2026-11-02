@@ -13,6 +13,7 @@ def main():
     for folder in ('workbench','.github','scripts'):
         for path in (ROOT/folder).rglob('*'):
             if not path.is_file():continue
+            if folder=='scripts' and path.name!='prepare_release.py':continue
             relative=path.relative_to(ROOT)
             if any(part in ('data','__pycache__','.git') for part in relative.parts):continue
             if path.suffix.lower() in ('.pyc','.pt','.pth','.npz','.sqlite3','.png','.jpg','.zip'):continue

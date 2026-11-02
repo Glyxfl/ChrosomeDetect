@@ -23,8 +23,10 @@ class Service:
                 job.update(status='failed',error='服务重启中断，请重新提交',finished_at=now())
                 self.store.record('jobs',job)
         self.job_lock = threading.RLock()
+        from .slides import Slides
+        self.slides=Slides(self)
 
-    def upload(self, content, filename):
+    def upload(self, content, filename, identifier=None):
         start=time.perf_counter()
         try:
             with Image.open(io.BytesIO(content)) as raw:
@@ -33,7 +35,7 @@ class Service:
                 image = ImageOps.exif_transpose(raw).convert('RGB'); image.load()
         except (UnidentifiedImageError,OSError,Image.DecompressionBombError) as exc:
             raise ValueError('图片无法读取，请上传普通图像；SDPC/SDQC 使用离线切片入口') from exc
-        identifier=uuid.uuid4().hex;folder=self.store.root/'images';folder.mkdir(exist_ok=True)
+        identifier=identifier or uuid.uuid4().hex;folder=self.store.root/'images';folder.mkdir(exist_ok=True)
         image.save(folder/f'{identifier}.png')
         row=inference.quality(image)
         p=upgrade(dict(id=identifier,name=filename[:200],width=image.width,height=image.height,
@@ -46,6 +48,19 @@ class Service:
         p['timings'].append(dict(stage='quality',status='completed',compute_seconds=time.perf_counter()-start,
                                  queue_seconds=0,finished_at=now(),scope='upload_decode_quality_save_image'))
         return self.store.create(p)
+
+    def import_sdpc_crop(self,path,slide,row,identifier):
+        p=self.upload(path.read_bytes(),slide['name']+' / cluster_'+str(row['id']),identifier)
+        def attach(p):
+            bounds=row['crop_box_l0'];box=row['box_l0']
+            local=[max(0,box[0]-bounds[0]),max(0,box[1]-bounds[1]),min(p['width'],box[2]-bounds[0]),min(p['height'],box[3]-bounds[1])]
+            cluster=dict(id='cluster-'+str(row['id']),label='cluster',bbox=local,confidence=row['score'],source='model',reviewed=False,review_status='pending')
+            p['results']['clusters']=[cluster];p['predictions']['clusters']=self.snapshot([cluster],str(model_paths()['clusters']))
+            if slide.get('detector_config',{}).get('weights_sha256'):p['predictions']['clusters']['model_sha256']=slide['detector_config']['weights_sha256']
+            p['models']['clusters']=str(model_paths()['clusters'])
+            p['source_slide']=dict(id=slide['id'],name=slide['name'],source_sha256=slide['source_sha256'],dimensions_l0=slide['dimensions_l0'],crop_box_l0=bounds,cluster_box_l0=box,cluster_id=row['id'],partial=not slide['summary']['full_slide_run'])
+            p['input_type']='sdpc_crop';p['stage']='quality'
+        return self.store.change(p['id'],p['revision'],'sdpc:extract',attach)
 
     @staticmethod
     def snapshot(rows,model):

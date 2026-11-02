@@ -17,6 +17,11 @@
 *.onnx
 *.npz
 *.sqlite3*
+*.sdpc
+*.sdqc
+*.dll
+*.so
+*.part
 .env
 .env.*
 !.env.example

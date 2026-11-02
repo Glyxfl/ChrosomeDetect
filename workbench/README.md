@@ -4,8 +4,8 @@
 
 ## 工作流程
 
-1. 单张或批量上传图像，执行质量模型预标注，人工确认、修正或驳回。没有质量模型时明确使用规则，排除在模型一致率之外。不可用图片可确认归档，不能继续分析。
-2. 检测染色体簇，查看裁剪并在原图定位。可增删、修改框、排除误检、补齐漏检。完整复核后勾选完整真值，输出簇准确率 precision 和检出率 recall。
+1. 导入单个或多个 `.sdpc`，支持分块上传续传及服务端本地路径免复制。导入结束自动开始金字塔分块检测、跨块合并与原切片 L0 无损簇图导出，不需要先转成图片。扫描中显示进度，失败/中断可按原配置继续。
+2. 切片任务中预览检出簇并在原切片定位，进入簇图质量及人工复核。没有质量模型时明确使用规则。质量不可用可归档，不能继续后续分析。簇图内可调整候选框、补齐漏检并排除误检；完整真值只针对该裁图，不等于全切片完整真值。
 3. 对簇进行 MI / 非 MI / 不可判读分类，确认目标 MI。
 4. 在目标簇内提取具体染色体候选，保存原图坐标、轮廓、所属簇及 ID；可使用 `INSTANCE_WEIGHTS` 指定单条染色体 YOLO 检测/分割模型，未配置则使用需复核的连通区域算法。人工可选择所属簇、补框和排除误检，确认完整真值后计算候选识别指标。
 5. 对具体候选提取离群分数。原图红色高亮离群候选、蓝色显示其余候选，点选结果可辅助定位。样本不足 3 个时只提供定位，标记需人工判断。复核为离群或正常后确认并导出。
@@ -20,9 +20,13 @@ SQLite 持久保存项目、修改前后快照、任务及批次记录。每次�
 
 批量页支持勾选 1–200 张按阶段排队，人工关卡不会被自动跳过；失败项和待复核项单独显示。任务重启中断会记录失败，需重新提交。
 
-导出 JSON 或单张/批量 ZIP。ZIP 包含汇总指标、JSON/CSV、原图、高亮图、簇/候选裁剪、预测快照、审计与任务/耗时记录。原图不修改，所有坐标均对应 EXIF 校正后的原图像素。
+导出 JSON 或单簇/批量 ZIP。ZIP 包含汇总指标、JSON/CSV、L0 原始簇图、高亮图、候选裁剪、预测快照、审计与任务/耗时记录。SDPC 来源额外包含 `source_sdpc.json` 和切片概览；原始 SDPC 单独流式下载，不默认重复塞入每个簇的 ZIP。记录同时保留簇图本地 `bbox` / `polygon` 与全切片 `bbox_l0` / `polygon_l0`，通过 `source_slide` 和 SHA-256 追溯来源。
+
+原生 SDK 操作在独立进程运行。全切片 L0 不会整体解码进内存；检测读取 L1/L2 图块，簇图从原生 L0 重读。大于 6000 万像素的异常合并框会记录为导出失败，避免巨幅分配。浏览器缩放按需请求不超过 4096 单边原生像素的区域。
 
 指标没有真值时输出 null/待复核，不能解释为 0%。图像质量模型一致率仅统计已人工确认且未过期的模型预标注；规则与合成模型来源单独标识。precision 与 recall 基于 IoU ≥ 0.5 的一对一匹配。人工复核符合率不是独立测试性能。
+
+网页项目和批量指标默认仅使用 SDPC 来源的簇图，排除历史普通图片和合成演示项目。API 可用 `?source=sdpc` 限定同一范围；未加过滤参数的兼容接口仍返回全部历史项目。
 
 ## 训练与测试
 
@@ -51,7 +55,17 @@ python -m workbench.pipeline test --config workbench/configs/phase.json --weight
 | 接口 | 用途 |
 |---|---|
 | GET `/api/health` | 模型文件可用状态 |
-| GET/POST `/api/projects` | 项目列表 / 原始二进制图片上传，X-Filename URI 编码 |
+| GET `/api/projects` | 簇图复核项目列表 |
+| POST `/api/slides/uploads` | 创建 SDPC 上传，name / size，默认上限 64 GiB |
+| GET `/api/slides/uploads/:id` | 读取已接收字节数，供续传 |
+| POST `/api/slides/uploads/:id/chunk` | 原始二进制分块，最大 8 MiB，X-Offset 为起点 |
+| POST `/api/slides/uploads/:id/finish` | 完成上传并自动入队全片提簇 |
+| POST `/api/slides/local` | 服务端已有 SDPC 路径 path，免复制并自动提簇 |
+| GET `/api/slides`、`/api/slides/:id` | 切片任务摘要 / 检出簇、来源和扫描范围 |
+| POST `/api/slides/:id/run` | 对失败或中断的切片按原参数继续扫描 |
+| GET `/api/slides/:id/overview` | 小尺寸金字塔概览 |
+| GET `/api/slides/:id/region?box=x1,y1,x2,y2&level=N` | 原生金字塔区域，box 为 L0 坐标 |
+| GET `/api/slides/:id/source`、`.../log`、`.../findings` | 原始 SDPC（支持 Range）/ 扫描日志 / 全切片异常定位坐标 |
 | GET `/api/projects/:id` | 项目 JSON |
 | POST `.../annotations` | 全量阶段标注，stage / rows / revision |
 | POST `.../review` | row_id / decision(confirm,reject,correct) / label / reviewer / reason / stage / revision |
@@ -67,7 +81,7 @@ python -m workbench.pipeline test --config workbench/configs/phase.json --weight
 | GET `.../:id/bundle` | 单张完整 ZIP |
 | GET `/api/bundle?id=ID1&id=ID2` | 批量完整 ZIP |
 
-阶段名为 quality / clusters / phase / instances / outliers。上传最大 64 MB、6000 万像素，TIFF 仅读第一帧。SDPC/SDQC 巨幅全切片仍需既有离线切块流程。
+SDPC 主导入默认扫描整张切片，不接受 PNG/JPEG 替代原始输入。`/api/slides/local` 的 roi / limit 仅供明确的局部诊断，结果标记 `partial`。后续簇图阶段名为 quality / clusters / phase / instances / outliers。旧 `/api/projects` 的普通图片 POST 只保留为历史兼容和自动化合成夹具入口，不再用于网页主流程。
 
 ## 验证
 
@@ -75,6 +89,15 @@ python -m workbench.pipeline test --config workbench/configs/phase.json --weight
 python -m unittest discover -s workbench/tests -v
 python -m workbench.tests.http_smoke
 node --check workbench/web/app.js
+node --check workbench/web/slides.js
 ```
 
 测试使用临时合成图像与数据，不修改业务标注。单分类测试会在临时目录执行 1 epoch；合成测试只验证流程，不衡量真实图像效果。CPU/GPU 模型加载时间计入单张机器耗时，人工和队列等待另列或排除。
+
+真实 SDPC 小范围验收（必须显式指定 ROI，输出标记为局部，不触发整片测试）：
+
+```text
+python -m workbench.tests.sdpc_smoke --source path/to/slide.sdpc --output path/to/qa-runtime --roi X0 Y0 X1 Y1
+```
+
+该验收会比较导出的 L0 PNG 与原切片对应区域是否像素完全一致，并校验全片坐标映射。

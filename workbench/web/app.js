@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const stages = ['quality', 'clusters', 'phase', 'instances', 'outliers'];
-const titles = ['图像质量分级', '染色体簇提取', '分裂期识别', '染色体候选定位', '离群点提取'];
+const titles = ['簇图质量分级', '染色体簇确认', '分裂期识别', '染色体候选定位', '离群点提取'];
 const descriptions = ['复核模型预分级；不可用图片可确认归档，但不能进入分析。', '提取候选簇并定位。完整复核误检与漏检后勾选真值确认，可计算识别指标。', '当前识别 MI / 非 MI / 不可判读；确认目标 MI 后进入单条染色体候选提取。', '分割或检测簇内染色体候选，保留原图坐标、所属簇和唯一编号。相连区域需人工修正。', '按具体染色体候选计算相对离群分数，红色高亮疑似离群；需人工确认或驳回。'];
 const labels = {clear:'清晰',blurry:'模糊',unusable:'不可用',cluster:'染色体簇',chromosome:'染色体候选',exclude:'排除',mi:'MI（目标分裂期）',non_mi:'非 MI',unreadable:'不可判读',unknown:'待确认',outlier:'离群点',normal:'正常 / 保留'};
 const options = {quality:['clear','blurry','unusable'],clusters:['cluster','exclude'],phase:['unknown','mi','non_mi','unreadable'],instances:['chromosome','exclude'],outliers:['unknown','outlier','normal']};
@@ -24,7 +24,7 @@ async function guarded(fn) {
   finally { busy=false; renderActions(); }
 }
 async function listProjects() {
-  const rows=await api('/api/projects');
+  const rows=await api('/api/projects?source=sdpc');
   $('projects').innerHTML='<option value="">选择已有项目</option>'+rows.map(p=>`<option value="${p.id}">${escapeHTML(p.name)}</option>`).join('');
   if(project) $('projects').value=project.id;
 }
@@ -34,22 +34,7 @@ async function load(id) {
   render(); $('projects').value=id;
 }
 async function upload(files) {
-  files=Array.from(files||[]);if(!files.length) return;
-  await guarded(async()=>{
-    const uploaded=[],errors=[];
-    for(const [i,file] of files.entries()){
-      message(`正在导入 ${i+1}/${files.length}：${file.name}，生成质量预标注…`);
-      try{
-        if(file.size>64*1024*1024)throw new Error('超过 64 MB');
-        const response=await fetch('/api/projects',{method:'POST',headers:{'X-Filename':encodeURIComponent(file.name)},body:file});
-        const data=await response.json();if(!response.ok)throw new Error(data.error);uploaded.push(data.id);
-      }catch(e){errors.push(file.name+'：'+e.message);}
-    }
-    await listProjects();
-    if(uploaded.length)await load(uploaded[0]);
-    message(`导入成功 ${uploaded.length}/${files.length}。${errors.join('；')}`,!errors.length);
-    if(files.length>1){batchSelected=new Set(uploaded);await showBatch();$('batchStatus').textContent=`导入成功 ${uploaded.length}/${files.length}。${errors.join('；')}`;}
-  });
+  await uploadSdpc(files);
   $('upload').value=''; $('emptyUpload').value='';
 }
 function renderActions() {
@@ -71,6 +56,8 @@ function render() {
   $('stageDescription').textContent=descriptions[stages.indexOf(stage)];
   $('reviewTitle').textContent=stage==='quality'?'质量复核':'候选结果 / 人工复核';
   $('imageMeta').textContent=`${project.name} · ${project.width} × ${project.height} px · 版本 ${project.revision} · 坐标基于上传原图`;
+  $('sourceLink').hidden=!project.source_slide;
+  if(project.source_slide)$('imageMeta').textContent=`${project.name} · ${project.width} × ${project.height} 簇图本地像素 · SDPC L0 起点 (${project.source_slide.crop_box_l0.slice(0,2).join(', ')})${project.source_slide.partial?' · 局部扫描来源':''}`;
   $('confirm').textContent=stage==='outliers'?'确认本次结果 ✓':'确认并进入下一步 →';
   $('draw').hidden=!['clusters','instances'].includes(stage);
   $('truthLabel').hidden=!['clusters','instances'].includes(stage);$('truthComplete').checked=!!project.truth_complete?.[stage];
@@ -203,7 +190,7 @@ $('confirm').onclick=()=>guarded(async()=>{
 $('predict').onclick=run;
 $('upload').onchange=e=>upload(e.target.files);$('emptyUpload').onchange=e=>upload(e.target.files);
 $('projects').onchange=e=>{if(e.target.value)guarded(()=>load(e.target.value));};
-function page(training){batchVisible=false;clearTimeout(batchTimer);$('batchPage').hidden=true;$('batchNav').classList.remove('active');$('analysisPage').hidden=training;$('trainingPage').hidden=!training;$('analysisNav').classList.toggle('active',!training);$('trainingNav').classList.toggle('active',training);$('pageTitle').textContent=training?'为下一轮模型迭代做好准备':'从原始图像到离群点';if(!training)requestAnimationFrame(resetView);}
+function page(training){leaveSlides();$('slidesPage').hidden=true;$('slidesNav').classList.remove('active');batchVisible=false;clearTimeout(batchTimer);$('batchPage').hidden=true;$('batchNav').classList.remove('active');$('analysisPage').hidden=training;$('trainingPage').hidden=!training;$('analysisNav').classList.toggle('active',!training);$('trainingNav').classList.toggle('active',training);$('pageTitle').textContent=training?'为下一轮模型迭代做好准备':'SDPC 簇图复核与分析';if(!training)requestAnimationFrame(resetView);}
 $('analysisNav').onclick=()=>page(false);$('trainingNav').onclick=()=>page(true);
 window.addEventListener('resize',paint);
 const percent=v=>v===null||v===undefined?'待复核':(v*100).toFixed(1)+'%';
@@ -217,6 +204,7 @@ async function refreshMetrics(){
     metricCard('单张机器耗时',r.efficiency.machine_seconds.toFixed(2)+' s',r.efficiency.complete?'完整流程，不含人工等待':'流程尚未完成，当前累计');
 }
 async function showBatch(){
+  leaveSlides();$('slidesPage').hidden=true;$('slidesNav').classList.remove('active');
   batchVisible=true;$('analysisPage').hidden=true;$('trainingPage').hidden=true;$('batchPage').hidden=false;
   $('analysisNav').classList.remove('active');$('trainingNav').classList.remove('active');$('batchNav').classList.add('active');$('pageTitle').textContent='批量处理、人工复核与指标';
   await refreshBatch();
@@ -227,7 +215,8 @@ function updateBatchLink(){
 }
 async function refreshBatch(){
   clearTimeout(batchTimer);
-  const [projects,report,batches]=await Promise.all([api('/api/projects'),api('/api/metrics'),api('/api/batches')]);
+  const [projects,report,allBatches]=await Promise.all([api('/api/projects?source=sdpc'),api('/api/metrics?source=sdpc'),api('/api/batches')]);
+  const batches=allBatches.filter(b=>b.items.some(i=>projects.some(p=>p.id===i.project_id)));
   const q=report.quality_model_agreement,d=report.instances,e=report.efficiency;
   $('batchMetrics').innerHTML=metricCard('模型质量分级一致率',percent(q.rate),`已复核 ${q.reviewed} 张 · 合成初始化 ${q.bootstrap_count} 张`)+
     metricCard('染色体识别准确率',percent(d.precision),`完整复核 ${d.evaluated_images} 张 · TP ${d.tp} / FP ${d.fp}`)+
@@ -241,6 +230,7 @@ async function refreshBatch(){
   updateBatchLink();if(batchVisible&&batches.some(b=>b.status==='running'))batchTimer=setTimeout(()=>refreshBatch().catch(e=>$('batchStatus').textContent=e.message),1500);
 }
 $('batchNav').onclick=()=>showBatch().catch(e=>message(e.message));
+$('sourceLink').onclick=()=>{if(project?.source_slide)showSlides(project.source_slide.id,project.id).catch(e=>slideMessage(e.message));};
 $('batchRefresh').onclick=()=>refreshBatch().catch(e=>$('batchStatus').textContent=e.message);
 $('batchRows').onchange=e=>{const id=e.target.dataset.project;if(!id)return;e.target.checked?batchSelected.add(id):batchSelected.delete(id);updateBatchLink();};
 $('batchRows').onclick=e=>{const id=e.target.dataset.open;if(!id)return;page(false);guarded(()=>load(id));};

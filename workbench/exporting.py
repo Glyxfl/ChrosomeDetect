@@ -45,8 +45,13 @@ def bundle(service,identifiers):
                 prefix=p['id']+'/';im=service.image(p['id'])
                 z.writestr(prefix+'result.json',json_bytes(p));z.writestr(prefix+'metrics.json',json_bytes(evaluate(p)))
                 z.writestr(prefix+'audit.json',json_bytes(service.store.history(p['id'])))
-                z.writestr(prefix+'jobs.json',json_bytes([j for j in service.jobs.values() if j['project_id']==p['id']]))
+                z.writestr(prefix+'jobs.json',json_bytes([j for j in service.jobs.values() if j['project_id']==p['id'] or j.get('slide_id')==p.get('source_slide',{}).get('id','not-a-slide')]))
                 z.writestr(prefix+'timings.json',json_bytes(p['timings']))
+                if p.get('source_slide'):
+                    source=service.slides.get(p['source_slide']['id'])
+                    z.writestr(prefix+'source_sdpc.json',json_bytes(source))
+                    overview=service.slides.folder(source['id'])/'overview.jpg'
+                    if overview.is_file():z.write(overview,prefix+'slide_overview.jpg')
                 z.write(service.store.root/'images'/f"{p['id']}.png",prefix+'original.png')
                 buffer=io.BytesIO();overlay(im,p).save(buffer,'PNG');z.writestr(prefix+'annotated.png',buffer.getvalue())
                 rows=[]

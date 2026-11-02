@@ -2,6 +2,7 @@ import copy
 import json
 import sqlite3
 import threading
+from pathlib import Path
 from datetime import datetime, timezone
 from .config import DATA, STAGES
 
@@ -13,7 +14,7 @@ class Conflict(ValueError):
 
 class Store:
     def __init__(self, root=DATA):
-        self.root = root
+        self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         with self.connect() as db:
@@ -64,6 +65,7 @@ class Store:
                 raise Conflict('结果已更新，请刷新后重试')
             before = copy.deepcopy(project)
             fn(project)
+            project=upgrade(project)
             project['revision'] += 1
             project['updated_at'] = now()
             db.execute('UPDATE projects SET body=? WHERE id=?', (json.dumps(project, ensure_ascii=False), identifier))
@@ -77,6 +79,8 @@ def invalidate(project, stage):
     index = STAGES.index(stage)
     project['confirmed'][stage] = False
     for downstream in STAGES[index + 1:]:
+        # SDPC detection preceded crop quality grading and is independent of it.
+        if stage=='quality' and downstream=='clusters' and project.get('source_slide'):continue
         project['confirmed'][downstream] = False
         if downstream != 'clusters':
             project['results'][downstream] = []
@@ -103,4 +107,14 @@ def upgrade(project):
         if not project['confirmed'][stage]:
             project['stage']=stage
             break
+    source=project.get('source_slide')
+    if source:
+        ox,oy=source['crop_box_l0'][:2]
+        for group in [project['results'], *[{'prediction':s['rows']} for s in project.get('predictions',{}).values()]]:
+            for rows in group.values():
+                for row in rows:
+                    if 'bbox' in row:
+                        b=row['bbox'];row['bbox_l0']=[b[0]+ox,b[1]+oy,b[2]+ox,b[3]+oy];row['slide_id']=source['id']
+                        if row.get('polygon'):row['polygon_l0']=[[x+ox,y+oy] for x,y in row['polygon']]
+                        else:row.pop('polygon_l0',None)
     return project

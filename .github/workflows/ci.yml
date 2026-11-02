@@ -15,3 +15,4 @@ jobs:
       - run: python -m unittest discover -s workbench/tests -v
       - run: python -m workbench.tests.http_smoke
       - run: node --check workbench/web/app.js
+      - run: node --check workbench/web/slides.js
